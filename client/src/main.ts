@@ -171,7 +171,8 @@ async function main() {
     x.em.FS.writeFile(`/rodir/${config.game_dir}/extras.pk3`, new Uint8Array(extras))
     x.em.FS.chdir('/rodir')
 
-    (document.getElementById('form') as HTMLFormElement).style.display = 'none';
+    const form = document.getElementById('form') as HTMLFormElement
+    form.style.display = 'none'
 
     const username = config.spectator_name
     setStage('Conectando…', 1)
