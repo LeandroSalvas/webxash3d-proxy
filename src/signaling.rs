@@ -1,7 +1,7 @@
 //! WebRTC signaling over WebSocket for game client connections.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
@@ -16,6 +16,7 @@ use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc_ice::udp_network::{EphemeralUDP, UDPNetwork};
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -53,7 +54,7 @@ pub async fn handle_websocket(socket: WebSocket, config: Arc<Config>, client_id:
     let ws_sender: WsSender = Arc::new(Mutex::new(ws_sender));
 
     // Create WebRTC peer connection
-    let peer = match create_peer_connection(config.public_ip.clone()).await {
+    let peer = match create_peer_connection(config.public_ip.clone(), &config).await {
         Ok(p) => Arc::new(p),
         Err(e) => {
             error!(client_id = %client_id, error = %e, "Failed to create peer connection");
@@ -63,6 +64,7 @@ pub async fn handle_websocket(socket: WebSocket, config: Arc<Config>, client_id:
 
     // Create data channels
     let Some((write_channel, read_channel)) = create_data_channels(&peer, &client_id).await else {
+        close_peer(&peer, &client_id).await;
         return;
     };
 
@@ -85,16 +87,19 @@ pub async fn handle_websocket(socket: WebSocket, config: Arc<Config>, client_id:
 
     // Send offer to client
     if !send_offer(&peer, &ws_sender, &client_id).await {
+        close_peer(&peer, &client_id).await;
         return;
     }
 
     // Handle incoming WebSocket messages
-    handle_ws_messages(ws_receiver, peer, client_id.clone()).await;
+    handle_ws_messages(ws_receiver, &peer, client_id.clone()).await;
 
     // Cleanup
     if let Some(b) = bridge.lock().await.take() {
         b.shutdown();
     }
+
+    close_peer(&peer, &client_id).await;
 
     info!(client_id = %client_id, "WebSocket connection closed");
 }
@@ -143,6 +148,11 @@ fn setup_bridge_callbacks(
 ) {
     let channels_open = Arc::new(AtomicU8::new(0));
 
+    // Use Weak references so the on_open callbacks (stored inside the channels)
+    // do not keep the channels alive after the peer connection is dropped.
+    let write_weak = Arc::downgrade(write_channel);
+    let read_weak = Arc::downgrade(read_channel);
+
     // Setup write channel on_open callback
     setup_channel_on_open(
         write_channel,
@@ -150,8 +160,8 @@ fn setup_bridge_callbacks(
         config.clone(),
         client_id.clone(),
         bridge.clone(),
-        write_channel.clone(),
-        read_channel.clone(),
+        write_weak.clone(),
+        read_weak.clone(),
     );
 
     // Setup read channel on_open callback
@@ -161,8 +171,8 @@ fn setup_bridge_callbacks(
         config,
         client_id,
         bridge,
-        write_channel.clone(),
-        read_channel.clone(),
+        write_weak,
+        read_weak,
     );
 }
 
@@ -173,8 +183,8 @@ fn setup_channel_on_open(
     config: Arc<Config>,
     client_id: String,
     bridge: BridgeHolder,
-    write_channel: Arc<RTCDataChannel>,
-    read_channel: Arc<RTCDataChannel>,
+    write_channel: Weak<RTCDataChannel>,
+    read_channel: Weak<RTCDataChannel>,
 ) {
     channel.on_open(Box::new(move || {
         let channels_open = channels_open.clone();
@@ -187,6 +197,12 @@ fn setup_channel_on_open(
         Box::pin(async move {
             let count = channels_open.fetch_add(1, Ordering::SeqCst) + 1;
             if count == 2 {
+                let Some(write_channel) = write_channel.upgrade() else {
+                    return;
+                };
+                let Some(read_channel) = read_channel.upgrade() else {
+                    return;
+                };
                 start_bridge(config, client_id, bridge, write_channel, read_channel).await;
             }
         })
@@ -237,6 +253,13 @@ fn setup_ice_handler(peer: &Arc<RTCPeerConnection>, ws_sender: WsSender, client_
 
             match c.to_json() {
                 Ok(json) => {
+                    // webrtc-rs hardcodes an empty sdpMid; the offer uses
+                    // a=mid:0 (single data-channel m-line), so browsers
+                    // reject candidates with sdpMid:"".
+                    let mut json = json;
+                    json.sdp_mid = Some("0".to_string());
+                    json.sdp_mline_index = Some(0u16);
+
                     let msg = SignalMessage {
                         event: events::CANDIDATE.to_string(),
                         data: serde_json::to_value(json).unwrap_or_default(),
@@ -264,9 +287,11 @@ fn setup_connection_monitor(
     bridge: BridgeHolder,
     client_id: String,
 ) {
+    let monitor_peer = Arc::downgrade(peer);
     peer.on_peer_connection_state_change(Box::new(move |state| {
         let client_id = client_id.clone();
         let bridge = bridge.clone();
+        let peer = monitor_peer.clone();
 
         Box::pin(async move {
             info!(client_id = %client_id, state = ?state, "Peer connection state changed");
@@ -278,11 +303,28 @@ fn setup_connection_monitor(
                     if let Some(b) = bridge.lock().await.take() {
                         b.shutdown();
                     }
+                    // Disconnected is transient in WebRTC; only close on
+                    // terminal states so recoverable connections survive.
+                    if matches!(
+                        state,
+                        RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
+                    ) {
+                        if let Some(peer) = peer.upgrade() {
+                            close_peer(&peer, &client_id).await;
+                        }
+                    }
                 }
                 _ => {}
             }
         })
     }));
+}
+
+/// Close a peer connection and log any errors
+async fn close_peer(peer: &Arc<RTCPeerConnection>, client_id: &str) {
+    if let Err(e) = peer.close().await {
+        error!(client_id = %client_id, error = %e, "Failed to close peer connection");
+    }
 }
 
 /// Create and send WebRTC offer to client
@@ -322,7 +364,7 @@ async fn send_offer(peer: &Arc<RTCPeerConnection>, ws_sender: &WsSender, client_
 /// Handle incoming WebSocket messages (answer, candidates)
 async fn handle_ws_messages(
     mut receiver: futures::stream::SplitStream<WebSocket>,
-    peer: Arc<RTCPeerConnection>,
+    peer: &Arc<RTCPeerConnection>,
     client_id: String,
 ) {
     while let Some(msg) = receiver.next().await {
@@ -338,10 +380,10 @@ async fn handle_ws_messages(
 
                 match signal.event.as_str() {
                     events::ANSWER => {
-                        handle_answer(&peer, &signal, &client_id).await;
+                        handle_answer(peer, &signal, &client_id).await;
                     }
                     events::CANDIDATE => {
-                        handle_candidate(&peer, signal.data, &client_id).await;
+                        handle_candidate(peer, signal.data, &client_id).await;
                     }
                     _ => {
                         warn!(client_id = %client_id, event = %signal.event, "Unknown signal event");
@@ -390,7 +432,7 @@ async fn handle_answer(peer: &Arc<RTCPeerConnection>, signal: &SignalMessage, cl
 
 /// Handle ICE candidate from client
 async fn handle_candidate(peer: &Arc<RTCPeerConnection>, data: serde_json::Value, client_id: &str) {
-    debug!(client_id = %client_id, "Received ICE candidate");
+    debug!(client_id = %client_id, data = %data, "Received ICE candidate");
 
     let candidate: RTCIceCandidateInit = match serde_json::from_value(data) {
         Ok(c) => c,
@@ -408,6 +450,7 @@ async fn handle_candidate(peer: &Arc<RTCPeerConnection>, data: serde_json::Value
 /// Create a new WebRTC peer connection
 async fn create_peer_connection(
     public_ip: Option<String>,
+    config: &Config,
 ) -> Result<RTCPeerConnection, Box<dyn std::error::Error + Send + Sync>> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
@@ -417,11 +460,23 @@ async fn create_peer_connection(
 
     let mut setting_engine = SettingEngine::default();
 
-    // Set public IP for NAT traversal if provided
-    if let Some(ip) = public_ip {
+    // Fixed UDP port range for WebRTC ICE (helps firewalls/NAT)
+    if let Some((start, end)) = config.udp_port_range_parsed() {
+        let mut ephemeral_udp = EphemeralUDP::default();
+        if let Err(e) = ephemeral_udp.set_ports(start, end) {
+            error!(error = %e, "Invalid UDP port range");
+            return Err(Box::new(e));
+        }
+        setting_engine.set_udp_network(UDPNetwork::Ephemeral(ephemeral_udp));
+    }
+
+    // Set public IP for NAT traversal if provided.
+    // Srflx type keeps the LAN host candidates AND adds public-IP
+    // candidates, so same-LAN viewers still work without hairpin NAT.
+    if let Some(ref ip) = public_ip {
         setting_engine.set_nat_1to1_ips(
-            vec![ip],
-            webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
+            vec![ip.clone()],
+            webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Srflx,
         );
     }
 
@@ -431,11 +486,20 @@ async fn create_peer_connection(
         .with_setting_engine(setting_engine)
         .build();
 
-    let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
+    // When a public IP is provided via nat_1to1 (Srflx), a STUN server must
+    // NOT be configured (webrtc-ice errors out otherwise). STUN is only used
+    // when there is no known public IP.
+    let ice_servers = if public_ip.is_some() {
+        vec![]
+    } else {
+        vec![RTCIceServer {
             urls: vec!["stun:stun.l.google.com:19302".to_string()],
             ..Default::default()
-        }],
+        }]
+    };
+
+    let config = RTCConfiguration {
+        ice_servers,
         ..Default::default()
     };
 

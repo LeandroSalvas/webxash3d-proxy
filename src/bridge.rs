@@ -87,7 +87,24 @@ impl Bridge {
                 result = self.udp_socket.recv(&mut buf) => {
                     match result {
                         Ok(n) if n > 0 => {
-                            let data = bytes::Bytes::copy_from_slice(&buf[..n]);
+                            let mut data = bytes::Bytes::copy_from_slice(&buf[..n]);
+
+                            // The HLTV appends a 16-zero cookie to the GoldSrc
+                            // connection approval ("B0000000000000000"), but the
+                            // Xash3D client only accepts the literal "B" reply
+                            // (real servers send a space-delimited "B <args>").
+                            // Rewrite so the handshake completes on first try.
+                            const HLTV_CONNECT_ACK: &[u8] = b"\xff\xff\xff\xffB0000000000000000";
+                            if data.len() == HLTV_CONNECT_ACK.len()
+                                && data.starts_with(HLTV_CONNECT_ACK)
+                            {
+                                data = bytes::Bytes::from_static(b"\xff\xff\xff\xffB\n");
+                                info!(
+                                    client_id = %self.client_id,
+                                    "Rewrote HLTV connect ack 'B'+cookie -> 'B'"
+                                );
+                            }
+
                             debug!(
                                 client_id = %self.client_id,
                                 bytes = n,

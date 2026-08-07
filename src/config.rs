@@ -39,6 +39,11 @@ pub struct Config {
     #[arg(long, default_value = "cstrike", env = "GAME_DIR")]
     pub game_dir: String,
 
+    /// Fixed UDP port range for WebRTC ICE (format "start-end"), for opening
+    /// ports on firewalls/NAT. Empty means ephemeral ports.
+    #[arg(long, env = "UDP_PORT_RANGE")]
+    pub udp_port_range: Option<String>,
+
     /// Extra console commands to execute on client start (comma-separated)
     #[arg(long, env = "CONSOLE_COMMANDS")]
     pub console_commands: Option<String>,
@@ -61,5 +66,17 @@ impl Config {
     /// Check if using embedded assets (no `static_dir` override)
     pub fn use_embedded_assets(&self) -> bool {
         self.static_dir.is_none()
+    }
+
+    /// Parse "start-end" UDP port range for WebRTC ICE
+    pub fn udp_port_range_parsed(&self) -> Option<(u16, u16)> {
+        let raw = self.udp_port_range.as_ref()?;
+        let mut parts = raw.split('-');
+        let start = parts.next()?.trim().parse::<u16>().ok()?;
+        let end = parts.next()?.trim().parse::<u16>().ok()?;
+        if start == 0 || end < start {
+            return None;
+        }
+        Some((start, end))
     }
 }

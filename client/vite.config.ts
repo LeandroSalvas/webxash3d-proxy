@@ -22,11 +22,6 @@ export default defineConfig({
                     dest: '.'
                 },
                 {
-                    // Copy valve.zip
-                    src: 'valve.zip',
-                    dest: '.'
-                },
-                {
                     src: 'logo.png',
                     dest: '.'
                 }

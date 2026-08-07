@@ -15,6 +15,8 @@ export class Xash3DWebRTC extends Xash3D {
     private wasRemote = false
     private timeout?: ReturnType<typeof setTimeout>
     private stream?: MediaStream
+    private reconnectTimer?: ReturnType<typeof setTimeout>
+    private reconnectDelay = 1000
     private proxyHost: string
     private proxyPort: number
     private proxyIp: [number, number, number, number]
@@ -44,7 +46,9 @@ export class Xash3DWebRTC extends Xash3D {
     }
 
     startConnection() {
-        this.peer = new RTCPeerConnection()
+        this.peer = new RTCPeerConnection({
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        })
         this.peer.onicecandidate = e => {
             if (!e.candidate) {
                 return
@@ -76,7 +80,12 @@ export class Xash3DWebRTC extends Xash3D {
                 el = undefined
             }
             if (this.peer?.connectionState === 'failed') {
-                this.connectWs()
+                this.peer.close()
+                this.peer = undefined
+                this.remoteDescription = undefined
+                this.candidates = []
+                this.wasRemote = false
+                this.scheduleReconnect()
             }
         }
         this.stream?.getTracks()?.forEach(t => {
@@ -163,9 +172,29 @@ export class Xash3DWebRTC extends Xash3D {
         })
     }
 
+    private scheduleReconnect() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer)
+        }
+        const delay = this.reconnectDelay
+        this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000)
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = undefined
+            this.connectWs()
+        }, delay)
+    }
+
     private connectWs() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer)
+            this.reconnectTimer = undefined
+        }
         if (this.ws) {
-            this.ws.close()
+            const old = this.ws
+            old.onopen = null
+            old.onerror = null
+            old.onclose = null
+            old.close()
         }
         const protocol = window.location.protocol === "https:" ? "wss" : "ws";
         const host = window.location.host;
@@ -186,10 +215,11 @@ export class Xash3DWebRTC extends Xash3D {
         }
         this.ws = new WebSocket(`${protocol}://${host}/websocket`);
         this.ws.onerror = () => {
-            this.connectWs()
+            this.scheduleReconnect()
         }
         this.ws.addEventListener('message', handler)
         this.ws.onopen = () => {
+            this.reconnectDelay = 1000
             this.startConnection()
             if (!this.stream) {
                 this.timeout = setTimeout(() => {

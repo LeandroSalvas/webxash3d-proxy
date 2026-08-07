@@ -8,6 +8,7 @@ mod bridge;
 mod config;
 mod signaling;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -34,6 +35,7 @@ use config::Config;
 #[derive(Clone)]
 struct AppState {
     config: Arc<Config>,
+    spectator_counter: Arc<AtomicUsize>,
 }
 
 /// Client configuration response
@@ -42,6 +44,7 @@ struct ClientConfig {
     arguments: Vec<String>,
     console: Vec<String>,
     game_dir: String,
+    spectator_name: String,
     libraries: ClientLibraries,
     dynamic_libraries: Vec<String>,
     files_map: std::collections::HashMap<String, String>,
@@ -98,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         config: Arc::new(config.clone()),
+        spectator_counter: Arc::new(AtomicUsize::new(0)),
     };
 
     // Build router with API routes
@@ -248,6 +252,8 @@ async fn config_handler(State(state): State<AppState>) -> Json<ClientConfig> {
         .clone()
         .unwrap_or_else(|| state.config.host.clone());
 
+    let spectator_num = state.spectator_counter.fetch_add(1, Ordering::SeqCst) + 1;
+
     Json(ClientConfig {
         arguments: vec![
             "-windowed".to_string(),
@@ -256,6 +262,7 @@ async fn config_handler(State(state): State<AppState>) -> Json<ClientConfig> {
         ],
         console: state.config.get_console_commands(),
         game_dir: game_dir.clone(),
+        spectator_name: format!("spectator{spectator_num}"),
         libraries: ClientLibraries {
             // These paths are relative to the static directory
             // The client will load them from these URLs

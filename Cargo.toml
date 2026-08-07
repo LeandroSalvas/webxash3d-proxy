@@ -6,10 +6,9 @@ description = "WebRTC to UDP proxy for CS 1.6 / Half-Life"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# WebRTC
+tokio = { version = "1", features = ["full"] }# WebRTC
 webrtc = "0.11"
+webrtc-ice = "0.11"
 
 # WebSocket
 axum = { version = "0.7", features = ["ws"] }
@@ -55,3 +54,10 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+# Patch webrtc-dtls to fix DTLS handshake with modern browsers: the server
+# blindly used the client's first offered elliptic curve, but Chrome offers
+# post-quantum curves (e.g. X25519MLKEM768) first, which we don't implement,
+# failing the handshake with ErrInvalidNamedCurve.
+[patch.crates-io]
+webrtc-dtls = { path = "vendor-webrtc-dtls" }

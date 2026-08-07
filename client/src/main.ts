@@ -3,14 +3,9 @@ import xashURL from 'xash3d-fwgs/xash.wasm?url'
 import gl4esURL from 'xash3d-fwgs/libref_webgl2.wasm?url'
 import {Xash3DWebRTC} from "./webrtc";
 
-const touchControls = document.getElementById('touchControls') as HTMLInputElement
+let touchControls = document.getElementById('touchControls') as HTMLInputElement
 touchControls.addEventListener('change', () => {
     localStorage.setItem('touchControls', String(touchControls.checked))
-})
-
-let usernamePromiseResolve: (name: string) => void
-const usernamePromise = new Promise<string>(resolve => {
-    usernamePromiseResolve = resolve
 })
 
 async function fetchWithProgress(url: string) {
@@ -50,6 +45,7 @@ async function main() {
         arguments: string[];
         console: string[];
         game_dir: string;
+        spectator_name: string;
         libraries: {
             client: string;
             server: string;
@@ -111,9 +107,12 @@ async function main() {
     document.getElementById('logo')!.style.animationName = 'pulsate-end'
     document.getElementById('logo')!.style.animationFillMode = 'forwards'
     document.getElementById('logo')!.style.animationIterationCount = '1'
-    document.getElementById('logo')!.style.animationDirection = 'normal'
+    document.getElementById('logo')!.style.animationDirection = 'normal';
 
-    const username = await usernamePromise
+    (document.getElementById('form') as HTMLFormElement).style.display = 'none';
+    (document.getElementById('social') as HTMLDivElement).style.display = 'none';
+
+    const username = config.spectator_name
     x.main()
     if (touchControls.checked) {
         x.Cmd_ExecuteString('touch_enable 1')
@@ -135,6 +134,7 @@ async function main() {
         return '';
     });
 }
+
 const enableTouch = localStorage.getItem('touchControls')
 if (enableTouch === null) {
     const isMobile = !window.matchMedia('(hover: hover)').matches;
@@ -143,19 +143,5 @@ if (enableTouch === null) {
 } else {
     touchControls.checked = enableTouch === 'true'
 }
-
-const username = localStorage.getItem('username')
-if (username) {
-    (document.getElementById('username') as HTMLInputElement).value = username
-}
-
-(document.getElementById('form') as HTMLFormElement).addEventListener('submit', (e) => {
-    e.preventDefault()
-    const username = (document.getElementById('username') as HTMLInputElement).value
-    localStorage.setItem('username', username);
-    (document.getElementById('form') as HTMLFormElement).style.display = 'none';
-    (document.getElementById('social') as HTMLDivElement).style.display = 'none';
-    usernamePromiseResolve(username)
-})
 
 main()
