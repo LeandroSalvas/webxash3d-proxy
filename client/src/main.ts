@@ -8,8 +8,50 @@ touchControls.addEventListener('change', () => {
     localStorage.setItem('touchControls', String(touchControls.checked))
 })
 
+let x: Xash3DWebRTC | undefined
+let started = false
+let configHost = ''
+let configPort = 0
+
+const stageEl = document.getElementById('stage') as HTMLElement
+const percentEl = document.getElementById('percent') as HTMLElement
+const fillEl = document.getElementById('barFill') as HTMLElement
+const loadingEl = document.getElementById('loading') as HTMLElement
+const errorEl = document.getElementById('error') as HTMLElement
+
+function setStage(text: string, fraction?: number) {
+    stageEl.textContent = text
+    if (typeof fraction === 'number') {
+        fillEl.classList.remove('indeterminate')
+        const pct = Math.max(0, Math.min(100, Math.round(fraction * 100)))
+        fillEl.style.width = pct + '%'
+        percentEl.textContent = pct + '%'
+    } else {
+        fillEl.classList.add('indeterminate')
+        fillEl.style.width = '100%'
+        percentEl.textContent = '…'
+    }
+}
+
+function showError(message: string) {
+    loadingEl.classList.add('error')
+    stageEl.textContent = 'Ocorreu um erro'
+    percentEl.textContent = ''
+    errorEl.style.display = 'block'
+    errorEl.textContent = message
+}
+
+window.addEventListener('error', (e) => {
+    const msg = e.message || 'Erro desconhecido'
+    if (msg !== 'Script error.') {
+        showError(msg)
+    }
+})
+window.addEventListener('unhandledrejection', (e) => {
+    showError(e.reason instanceof Error ? e.reason.message : String(e.reason))
+})
+
 async function fetchWithProgress(url: string) {
-    const progress = document.getElementById('progress') as HTMLProgressElement
     const res = await fetch(url);
 
     const contentLength = res.headers.get('Content-Length');
@@ -19,6 +61,7 @@ async function fetchWithProgress(url: string) {
     const chunks = [];
     let received = 0;
 
+    setStage('Baixando arquivos…', 0)
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -26,14 +69,12 @@ async function fetchWithProgress(url: string) {
         chunks.push(value);
         received += value.length;
 
-        if ( total !== null) {
-            progress.value = received / total
+        if (total !== null) {
+            setStage('Baixando arquivos…', received / total)
         } else {
-            progress.value = received
+            setStage('Baixando arquivos…')
         }
     }
-
-    progress.style.opacity = '0'
 
     const blob = new Blob(chunks);
     return blob.arrayBuffer()
@@ -59,9 +100,16 @@ async function main() {
         proxy_port: number;
     }>
 
+    const canvas = document.getElementById('canvas') as HTMLCanvasElement
+    const probe = document.createElement('canvas')
+    if (!window.WebGL2RenderingContext || !probe.getContext('webgl2')) {
+        showError('Seu navegador não suporta WebGL2, necessário para o espectador.\nAtualize o navegador ou tente em outro dispositivo.')
+        return
+    }
+
     // Use URLs directly from server config (no imports needed)
-    const x = new Xash3DWebRTC({
-        canvas: document.getElementById('canvas') as HTMLCanvasElement,
+    x = new Xash3DWebRTC({
+        canvas,
         arguments: config.arguments || ['-windowed'],
         libraries: {
             filesystem: config.libraries.filesystem,
@@ -77,56 +125,72 @@ async function main() {
         filesMap: config.files_map,
         proxyHost: config.proxy_host,
         proxyPort: config.proxy_port,
+        module: {
+            // Route the engine main loop through the visibility-aware shim so the
+            // game keeps simulating (and the netchan stays alive) while the tab is
+            // hidden. The global window shim covers Emscripten's window.* path.
+            requestAnimationFrame: (cb: FrameRequestCallback) => window.requestAnimationFrame(cb),
+            cancelAnimationFrame: (id: number) => window.cancelAnimationFrame(id),
+        },
     });
 
+    configHost = config.proxy_host
+    configPort = config.proxy_port
+
+    let bootDone = false
     const [zip, extras] = await Promise.all([
         (async () => {
             const res = await fetchWithProgress('valve.zip')
+            setStage(bootDone ? 'Preparando arquivos…' : 'Carregando, aguarde…')
             return await loadAsync(res);
         })(),
         (async () => {
             const res = await fetch(config.libraries.extras)
             return await res.arrayBuffer();
         })(),
-        x.init(),
+        (async () => {
+            const r = await x!.init()
+            bootDone = true
+            return r
+        })(),
     ])
 
-    await Promise.all(Object.entries(zip.files).map(async ([filename, file]) => {
-        if (file.dir) return;
-
+    const files = Object.entries(zip.files).filter(([, file]) => !file.dir)
+    setStage('Descompactando…', 0)
+    let written = 0
+    for (const [filename, file] of files) {
         const path = '/rodir/' + filename;
         const dir = path.split('/').slice(0, -1).join('/');
 
         x.em.FS.mkdirTree(dir);
         x.em.FS.writeFile(path, await file.async("uint8array"));
-    }))
+        written += 1
+        setStage('Descompactando…', written / files.length)
+    }
 
     x.em.FS.writeFile(`/rodir/${config.game_dir}/extras.pk3`, new Uint8Array(extras))
     x.em.FS.chdir('/rodir')
 
-    document.getElementById('logo')!.style.animationName = 'pulsate-end'
-    document.getElementById('logo')!.style.animationFillMode = 'forwards'
-    document.getElementById('logo')!.style.animationIterationCount = '1'
-    document.getElementById('logo')!.style.animationDirection = 'normal';
-
     (document.getElementById('form') as HTMLFormElement).style.display = 'none';
-    (document.getElementById('social') as HTMLDivElement).style.display = 'none';
 
     const username = config.spectator_name
+    setStage('Conectando…', 1)
+    loadingEl.classList.add('fade-out')
+    started = true
     x.main()
     if (touchControls.checked) {
         x.Cmd_ExecuteString('touch_enable 1')
     }
     x.Cmd_ExecuteString(`name "${username}"`)
-    
+
     // Execute custom server commands
     if (config.console && Array.isArray(config.console)) {
         config.console.forEach((cmd: string) => {
-            x.Cmd_ExecuteString(cmd)
+            x!.Cmd_ExecuteString(cmd)
         })
     }
-    
-    x.Cmd_ExecuteString(`connect ${config.proxy_host}:${config.proxy_port}`)
+
+    x.Cmd_ExecuteString(`connect ${configHost}:${configPort}`)
 
     window.addEventListener('beforeunload', (event) => {
         event.preventDefault();
@@ -134,6 +198,28 @@ async function main() {
         return '';
     });
 }
+
+// If the tab comes back after being hidden long enough for the engine's netchan
+// to time out (cl_timeout), rejoin over the still-alive WebRTC channel instead of
+// reloading the page (avoids re-downloading valve.zip).
+let hiddenSince = 0
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        hiddenSince = Date.now()
+        return
+    }
+    const hiddenFor = Date.now() - hiddenSince
+    if (started && x && hiddenFor > 15000) {
+        try {
+            x.Cmd_ExecuteString('disconnect')
+        } catch {}
+        setTimeout(() => {
+            try {
+                x!.Cmd_ExecuteString(`connect ${configHost}:${configPort}`)
+            } catch {}
+        }, 300)
+    }
+})
 
 const enableTouch = localStorage.getItem('touchControls')
 if (enableTouch === null) {

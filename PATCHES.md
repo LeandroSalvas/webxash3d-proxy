@@ -49,6 +49,28 @@ selecionando uma curva suportada, aplicado via `[patch.crates-io]` no
 - Build do cliente (Node/Vite) + proxy Rust em imagem multi-stage.
 - Runtime instala `wget` (usado pelo healthcheck do compose).
 
+## 6. Robustez do cliente espectador (client/src)
+
+- **Aba oculta não congela**: shim de `requestAnimationFrame` ciente de
+  visibilidade (script inline no `<head>`, antes do módulo) + `module: {
+  requestAnimationFrame, cancelAnimationFrame }` em `main.ts`. Com a aba oculta,
+  o loop vira `setTimeout` (~1fps), então o netchan do cliente não estoura o
+  `cl_timeout` e a sessão com o relay HLTV sobrevive ao voltar.
+- **Auto-reconexão em `visibilitychange`**: se a aba voltou após >15s oculta,
+  `disconnect` + `connect` pelo canal WebRTC ainda vivo (sem recarregar o
+  `valve.zip`).
+- **Microfone removido**: `getUserMedia` não é mais chamado (espectador não
+  fala). Isso desbloqueia o iOS Safari/iframe, onde a permissão sem gesto do
+  usuário travava o `connect()` e impedia o `x.main()`.
+- **Tela de loading com estágios**: rótulos PT-BR ("Baixando arquivos…",
+  "Descompactando…", "Conectando…"), barra customizada (track+fill) com % real
+  e animação indeterminada no boot do engine. Substitui a barra nativa de 8px.
+- **Erros visíveis**: `window.onerror`/`unhandledrejection` e checagem de
+  WebGL2 exibem a mensagem no overlay em vez de tela preta.
+- **Imagem**: crosshair do portal (`loading.png` 256px) substitui o logo do
+  xash3d no carregamento; `favicon.png` é o favicon do site; ícones sociais
+  (GitHub/Discord) removidos.
+
 ## Configuração de deploy
 
 A config de deployment (hltv.cfg, start-hltv.sh) vive em `config/watch/` no

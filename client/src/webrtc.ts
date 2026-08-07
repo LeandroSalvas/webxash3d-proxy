@@ -13,8 +13,6 @@ export class Xash3DWebRTC extends Xash3D {
     private remoteDescription?: RTCSessionDescription
     private candidates: RTCIceCandidateInit[] = []
     private wasRemote = false
-    private timeout?: ReturnType<typeof setTimeout>
-    private stream?: MediaStream
     private reconnectTimer?: ReturnType<typeof setTimeout>
     private reconnectDelay = 1000
     private proxyHost: string
@@ -60,6 +58,7 @@ export class Xash3DWebRTC extends Xash3D {
             el = document.createElement(e.track.kind) as HTMLAudioElement
             el.srcObject = e.streams[0]
             el.autoplay = true
+            el.setAttribute('playsinline', '')
             el.controls = true
             document.body.appendChild(el)
 
@@ -88,9 +87,6 @@ export class Xash3DWebRTC extends Xash3D {
                 this.scheduleReconnect()
             }
         }
-        this.stream?.getTracks()?.forEach(t => {
-            this.peer!.addTrack(t, this.stream!)
-        })
         let channelsCount = 0
         this.peer.ondatachannel = (e) => {
             if (e.channel.label === 'write') {
@@ -119,25 +115,12 @@ export class Xash3DWebRTC extends Xash3D {
                     if (this.resolve) {
                         const r = this.resolve
                         this.resolve = undefined
-                        if (this.timeout) {
-                            clearTimeout(this.timeout)
-                            this.timeout = undefined
-                        }
-                        document.getElementById('warning')!.style.opacity = '0'
                         r()
                     }
                 }
             }
         }
         this.handleDescription()
-    }
-
-    private async getUserMedia() {
-        try {
-            return await navigator.mediaDevices.getUserMedia({audio: true})
-        } catch (e) {
-            return undefined
-        }
     }
 
     private wsSend(event: string, data: unknown) {
@@ -221,17 +204,10 @@ export class Xash3DWebRTC extends Xash3D {
         this.ws.onopen = () => {
             this.reconnectDelay = 1000
             this.startConnection()
-            if (!this.stream) {
-                this.timeout = setTimeout(() => {
-                    this.timeout = undefined
-                    document.getElementById('warning')!.style.opacity = '1'
-                }, 10000)
-            }
         }
     }
 
     async connect() {
-        this.stream = await this.getUserMedia()
         return new Promise(resolve => {
             this.resolve = resolve;
             this.connectWs()

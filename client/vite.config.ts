@@ -17,12 +17,12 @@ export default defineConfig({
                     dest: '.'
                 },
                 {
-                    // Copy favicon and logo
+                    // Copy favicon and loading images
                     src: 'favicon.png',
                     dest: '.'
                 },
                 {
-                    src: 'logo.png',
+                    src: 'loading.png',
                     dest: '.'
                 }
             ]
