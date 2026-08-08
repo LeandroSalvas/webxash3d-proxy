@@ -195,16 +195,28 @@ async function main() {
 }
 
 // Game-level rejoin: drop the HLTV spectator session and reconnect over the
-// (still-alive) WebRTC channel. Used for long hidden tabs and for stream stalls,
-// avoiding a full reload (which would re-download valve.zip).
+// (still-alive) WebRTC channel. Used for long hidden tabs, stream stalls and
+// for the backlog high-watermark, avoiding a full reload (which would
+// re-download valve.zip).
 let rejoinInFlight = false
 function rejoin() {
     if (rejoinInFlight || !x || !started) return
     rejoinInFlight = true
     try {
+        // Descarta o backlog da sessão anterior: pacotes velhos enfileirados
+        // seriam entregues à nova conexão e quebrariam a cadeia delta dela.
+        x.netClear()
+    } catch {}
+    try {
         x.Cmd_ExecuteString('disconnect')
     } catch {}
     setTimeout(() => {
+        try {
+            // Limpa de novo o que chegou durante o desconecte (a fila do relay
+            // antigo ainda drena por alguns instantes) antes de abrir a nova
+            // sessão.
+            x!.netClear()
+        } catch {}
         try {
             x!.Cmd_ExecuteString(`connect ${configHost}:${configPort}`)
         } catch {}
@@ -212,7 +224,7 @@ function rejoin() {
     }, 300)
 }
 
-// The net.incoming backlog (maxPackets 8192, ~5.7min at 24fps) keeps the delta
+// The net.incoming backlog (maxPackets 16384, ~11min at 24fps) keeps the delta
 // chain intact for hides below that: on refocus the engine drains it in order and
 // fast-forwards to live instead of freezing. For hides long enough that the
 // buffer could overflow (or cl_timeout), rejoin over the still-alive WebRTC
@@ -237,11 +249,31 @@ document.addEventListener('visibilitychange', () => {
 // reload loop while the game server is genuinely down.
 const STALL_MS = 15000
 const REJOIN_ATTEMPTS_BEFORE_RELOAD = 6
+// Overflow do buffer é fatal: o RollingBuffer descarta o pacote MAIS ANTIGO
+// quando enche (quebra a cadeia delta do HLTV e congela o renderer para
+// sempre), e o watchdog de stall NÃO age porque os pacotes continuam chegando
+// (lastPacketAt segue atualizando). O relay produz mais rápido que o engine
+// consome (1 pacote/frame via recvfrom), então o backlog cresce por alguns
+// minutos mesmo com a aba ativa. Rejoin proativo ao atingir o teto, para
+// resetar a cadeia delta (via reconexão no canal WebRTC vivo) antes de
+// qualquer descarte.
+const BACKLOG_HIGH_WATERMARK = 0.8
 let stallCount = 0
+let backlogRejoins = 0
 setInterval(() => {
     if (!started || !x || document.hidden) return
     const lastPacketAt = x.lastPacketAt
     if (!lastPacketAt) return
+
+    const backlog = x.netBacklog()
+    const capacity = x.netCapacity()
+    if (backlog >= capacity * BACKLOG_HIGH_WATERMARK) {
+        backlogRejoins += 1
+        console.warn(`[backlog] buffer em ${backlog}/${capacity} (${Math.round((backlog / capacity) * 100)}%) — rejoin para resetar a cadeia delta (${backlogRejoins}º; drops: ${x.overflowDrops})`)
+        rejoin()
+        return
+    }
+
     const idleMs = Date.now() - lastPacketAt
     if (idleMs <= STALL_MS) {
         stallCount = 0

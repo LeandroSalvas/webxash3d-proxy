@@ -20,18 +20,50 @@ export class Xash3DWebRTC extends Xash3D {
     private proxyIp: [number, number, number, number]
     /** Timestamp of the last game packet received from the proxy (stall watchdog). */
     lastPacketAt = 0
+    /** How many packets the RollingBuffer dropped because it overflowed (diagnostics). */
+    overflowDrops = 0
+    private maxPackets = 16384
 
     constructor(opts: Xash3DWebRTCOptions) {
         super(opts);
         // Large packet backlog so the engine never drops packets while the tab
         // is hidden (rAF throttled ~1fps). Dropping the oldest packets breaks the
         // HLTV delta chain and permanently freezes the renderer ("delta frame is
-        // too old" -> validsequence=0). 8192 packets ~= 5.7min at 24fps; the
-        // reconnect threshold in main.ts (60s) sits well below that.
-        this.net = new Net(this, { maxPackets: 8192 })
+        // too old" -> validsequence=0). The relay also produces faster than the
+        // engine consumes (1 packet per frame via recvfrom), so the buffer fills
+        // up over a few minutes even with an active tab — the main.ts watchdog
+        // rejoins at 80% full to reset the chain before any drop.
+        this.net = new Net(this, { maxPackets: this.maxPackets })
         this.proxyHost = opts.proxyHost
         this.proxyPort = opts.proxyPort
         this.proxyIp = this.parseIp(opts.proxyHost)
+    }
+
+    /** Current number of queued incoming packets (used by the backlog watchdog). */
+    netBacklog(): number {
+        return (this.net as Net).incoming.size()
+    }
+
+    /** Capacity of the incoming packet buffer (netBacklog() / netCapacity()). */
+    netCapacity(): number {
+        return this.maxPackets
+    }
+
+    /** Drop every queued incoming packet (called on rejoin to clear stale session data). */
+    netClear(): void {
+        (this.net as Net).incoming.clear()
+    }
+
+    private enqueueIncoming(packet: Packet) {
+        const incoming = (this.net as Net).incoming
+        if (incoming.isFull()) {
+            // The RollingBuffer push() would drop the OLDEST packet, which breaks
+            // the HLTV delta chain and permanently freezes the renderer. main.ts
+            // should rejoin before this ever happens; log anyway for diagnosis.
+            this.overflowDrops += 1
+            console.warn(`[net] buffer cheio (${incoming.size()}/${this.maxPackets}), pacote antigo descartado — cadeia delta quebrada (drop #${this.overflowDrops})`)
+        }
+        incoming.enqueue(packet)
     }
 
     private parseIp(host: string): [number, number, number, number] {
@@ -107,10 +139,10 @@ export class Xash3DWebRTC extends Xash3D {
                     if (ee.data.arrayBuffer) {
                         ee.data.arrayBuffer().then((data: Int8Array) => {
                             packet.data = data;
-                            (this.net as Net).incoming.enqueue(packet)
+                            this.enqueueIncoming(packet)
                         })
                     } else {
-                        (this.net as Net).incoming.enqueue(packet)
+                        this.enqueueIncoming(packet)
                     }
                 }
             }

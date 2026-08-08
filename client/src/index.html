@@ -28,6 +28,25 @@
             };
         })();
     </script>
+    <script>
+        // No mic: this is a spectator-only client, it never transmits voice. The
+        // Xash3D engine glue requests microphone access on startup (SDL2/AL
+        // capture) which triggers a browser permission prompt. Reject it up front
+        // so the engine's onError path (which only records the error) falls back
+        // to silence — no prompt, no user confusion.
+        (function () {
+            var md = navigator.mediaDevices;
+            if (md && md.getUserMedia) {
+                var realGetUserMedia = md.getUserMedia.bind(md);
+                md.getUserMedia = function (constraints) {
+                    if (constraints && (constraints.audio || constraints.video)) {
+                        return Promise.reject(new Error('captura desabilitada (espectador)'));
+                    }
+                    return realGetUserMedia(constraints);
+                };
+            }
+        })();
+    </script>
     <script type="module" src="/main.ts"></script>
 
     <style>
