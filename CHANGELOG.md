@@ -1,3 +1,17 @@
+# Changelog
+
+## Fork `LeandroSalvas` (espectador CS 1.6)
+
+Base: upstream `9cb046f` (1.0.0). Alterações em `PATCHES.md`.
+
+## 1.2.0 (2026-08-07)
+
+* feat: self-healing spectator with silent reload and upstream watchdog ([763895d](https://github.com/LeandroSalvas/webxash3d-proxy/commit/763895d)) — watchdog de stall no cliente (`STALL_MS=15000` → rejoin → reload silencioso após 6 tentativas, guarda `sessionStorage`), teardown de idle na bridge (`IDLE_TIMEOUT=25s`, armado em `saw_packet || browser_started`), reconexão em close/error do canal, `beforeunload` removido
+* fix: keep HLTV delta chain intact while tab is hidden ([88d5901](https://github.com/LeandroSalvas/webxash3d-proxy/commit/88d5901)) — `maxPackets: 8192` no `net.incoming`
+* fix: prevent ASI bug merging chdir with following statement ([4e6dab6](https://github.com/LeandroSalvas/webxash3d-proxy/commit/4e6dab6))
+* feat: robust spectator client with staged loading UI ([4699baf](https://github.com/LeandroSalvas/webxash3d-proxy/commit/4699baf)) — loading PT-BR por estágios, `window.onerror`/WebGL2 check, `getUserMedia` removido, rAF shim ciente de visibilidade
+* feat: spectator mode for CS 1.6 HLTV relay via browser ([49e6430](https://github.com/LeandroSalvas/webxash3d-proxy/commit/49e6430)) — ack de conexão do HLTV reescrito, `PACKAGE_ZIP`/`UDP_PORT_RANGE`/`CONSOLE_COMMANDS`, build Docker multi-stage
+
 ## 1.0.0 (2026-01-11)
 
 * Merge pull request #1 from bordeux/feature/initial ([46e9466](https://github.com/bordeux/webxash3d-proxy/commit/46e9466)), closes [#1](https://github.com/bordeux/webxash3d-proxy/issues/1)

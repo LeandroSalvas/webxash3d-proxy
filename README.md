@@ -2,6 +2,29 @@
 
 A Rust WebRTC-to-UDP proxy that allows browser clients running Xash3D WASM to connect to real CS 1.6 / Half-Life dedicated servers.
 
+## Fork: espectador web de CS 1.6 (csserver_wstats)
+
+Este repositório é o **fork `LeandroSalvas/webxash3d-proxy`** (base `9cb046f`,
+release 1.0.0) usado como **espectador web** do projeto
+[`csserver_wstats`](https://github.com/LeandroSalvas/csserver_wstats). Em vez
+de apontar para o servidor de jogo, o proxy aponta para um **relay HLTV**, e o
+browser assiste a partida ao vivo.
+
+- **Patches do fork**: veja `PATCHES.md` (ack do HLTV, DTLS vendored para o
+  Chrome, auto-recuperação com watchdog/reload silencioso/teardown de idle,
+  robustez de aba oculta, etc.).
+- **Deploy**: o stack opt-in `watch-main` + `watch-hltv` é gerenciado pelo
+  `./scripts/watch.sh` no repo principal (compose em `docker-compose.watch.yml`,
+  config do relay em `config/watch/`). Portas: `27018` (página + signaling),
+  UDP `27019-27050` (ICE), relay HLTV `27020`. Exposição TLS via swag em
+  `https://zueiracstrike.duckdns.org:4445`.
+- **Auto-recuperação**: watchdog de stall no cliente (`STALL_MS=15000` →
+  rejoin → reload silencioso após 6 tentativas), teardown de idle na bridge
+  (`IDLE_TIMEOUT=25s`), reconexão em close/error do canal; a sessão sobrevive a
+  reinícios do servidor de jogo.
+- A porta default do proxy continua `27016`; o deploy a sobrescreve via
+  `LISTEN_PORT`/`WATCH_LISTEN_PORT=27018`.
+
 ## How It Works
 
 The proxy bridges the gap between browser-based WebRTC and traditional UDP game servers:

@@ -2,7 +2,8 @@
 
 Fork de `bordeux/webxash3d-proxy` (base: commit `9cb046f`, release 1.0.0) com
 as seguintes modificações locais, necessárias para o espectador de CS 1.6 via
-browser funcionar de forma estável.
+browser funcionar de forma estável (incluindo auto-recuperação em quedas do
+upstream).
 
 ## 1. Ack de conexão do HLTV (src/bridge.rs)
 
@@ -56,7 +57,13 @@ selecionando uma curva suportada, aplicado via `[patch.crates-io]` no
   requestAnimationFrame, cancelAnimationFrame }` em `main.ts`. Com a aba oculta,
   o loop vira `setTimeout` (~1fps), então o netchan do cliente não estoura o
   `cl_timeout` e a sessão com o relay HLTV sobrevive ao voltar.
-- **Auto-reconexão em `visibilitychange`**: se a aba voltou após >15s oculta,
+- **Backlog do net.incoming elevado**: `maxPackets: 8192` (~5,7 min a 24fps).
+  O padrão (128 pacotes, ~5,3s) descartava os pacotes mais antigos quando a aba
+  ficava oculta, quebrava a cadeia delta do HLTV ("delta frame is too old" →
+  `cl.validsequence=0`) e congelava o renderer permanentemente. Com o backlog
+  maior, escondidas curtas drenam os pacotes em ordem (fast-forward até o
+  ao-vivo) em vez de congelar.
+- **Auto-reconexão em `visibilitychange`**: se a aba voltou após >60s oculta,
   `disconnect` + `connect` pelo canal WebRTC ainda vivo (sem recarregar o
   `valve.zip`).
 - **Microfone removido**: `getUserMedia` não é mais chamado (espectador não
@@ -70,6 +77,46 @@ selecionando uma curva suportada, aplicado via `[patch.crates-io]` no
 - **Imagem**: crosshair do portal (`loading.png` 256px) substitui o logo do
   xash3d no carregamento; `favicon.png` é o favicon do site; ícones sociais
   (GitHub/Discord) removidos.
+
+## 7. Auto-recuperação (watchdog de stall, reload silencioso e teardown de idle)
+
+O upstream (HLTV / servidor de jogo) pode morrer sem o WebRTC perceber: os
+keepalives SCTP mantêm o peer "Connected" mesmo com os pacotes parando de
+chegar. Para o espectador não ficar congelado para sempre:
+
+- `client/src/webrtc.ts`: `lastPacketAt` registra o timestamp do último pacote
+  de jogo recebido (canal `write`). `onclose`/`onerror` do canal `write` e o
+  estado `failed` da peer connection chamam `scheduleReconnect()` — o proxy
+  derruba os canais quando o upstream morre, então o `onclose` destrava o
+  cliente que de outra forma ficaria "Connected" para sempre.
+- `client/src/main.ts`: watchdog de stall do stream (intervalo 2s, aba ativa).
+  Se nenhum pacote de jogo chegar em `STALL_MS = 15000`, força `rejoin()`
+  (disconnect + connect no mesmo canal WebRTC). Após
+  `REJOIN_ATTEMPTS_BEFORE_RELOAD = 6` tentativas, recarrega a página uma única
+  vez, de forma **silenciosa** (guarda `sessionStorage.watchStallReloaded`
+  impede loop de reload com o servidor genuinamente fora).
+- `src/bridge.rs`: timeout de idle no `forward_udp_to_webrtc` —
+  `IDLE_TIMEOUT = 25s` sem pacote do upstream derruba a bridge (`teardown`),
+  fechando os canais e sinalizando o cliente a reconectar via
+  `scheduleReconnect()`. O timeout só arma quando o upstream respondeu
+  (`saw_packet`) **ou** o browser iniciou o handshake de conexão
+  (`browser_started`), para não derrubar a bridge durante o download do
+  `valve.zip` / handshake.
+- **`beforeunload` removido**: o diálogo nativo "As alterações que você fez
+  talvez não sejam salvas" bloqueava o reload automático do watchdog; removido
+  para o reload ser silencioso.
+- **Sessão sobrevive ao restart do servidor de jogo**: o HLTV renegocia o ack
+  de conexão com o espectador existente e o stream retoma sem reload.
+
+## 8. Causa raiz conhecida: HLTV relay "mudo"
+
+O relay HLTV pode ficar sem enviar dados aos espectadores com o processo vivo e
+conectado ao servidor de jogo (foi o que congelou o espectador em 01:12:10,
+antes do deploy do watchdog). A auto-recuperação da seção 7 destrava a sessão,
+mas o destravamento definitivo é reiniciar o servidor de jogo (o HLTV reconecta
+sozinho em ~20s). Mitigação operacional sugerida (follow-up): alerta
+Grafana/Prometheus se o write-channel ficar 0 por N minutos, ou auto-restart do
+`watch-hltv`.
 
 ## Configuração de deploy
 
