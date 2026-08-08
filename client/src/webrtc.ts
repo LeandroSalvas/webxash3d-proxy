@@ -150,9 +150,15 @@ export class Xash3DWebRTC extends Xash3D {
                 // The proxy tears down the channels when the upstream (HLTV /
                 // game server) dies; the WebRTC peer otherwise stays "connected"
                 // via SCTP keepalives and the client would freeze forever.
+                if (e.channel.label === 'read') {
+                    this.channel = undefined
+                }
                 this.scheduleReconnect()
             }
             e.channel.onerror = () => {
+                if (e.channel.label === 'read') {
+                    this.channel = undefined
+                }
                 this.scheduleReconnect()
             }
             e.channel.onopen = () => {
@@ -264,7 +270,16 @@ export class Xash3DWebRTC extends Xash3D {
     }
 
     sendto(packet: Packet) {
-        if (!this.channel) return
-        this.channel.send(packet.data)
+        // The channel may be mid-teardown when the engine calls sendto (the
+        // proxy closes the channels when the upstream dies); sending on a
+        // closed channel throws InvalidStateError which aborts the WASM frame.
+        if (!this.channel || this.channel.readyState !== 'open') return
+        try {
+            this.channel.send(packet.data)
+        } catch (err) {
+            // SCTP buffer full (QuotaExceededError) or channel raced to close:
+            // drop the packet instead of crashing the engine.
+            console.warn('[net] sendto falhou, descartando pacote', err)
+        }
     }
 }

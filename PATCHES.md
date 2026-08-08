@@ -161,6 +161,41 @@ sobrescreve `navigator.mediaDevices.getUserMedia` para rejeitar
 glue (que apenas registra `mediaStreamError`) lida com a rejeição e o voice cai
 em silêncio — sem prompt e sem afetar o áudio de saída.
 
+## 11. Blindagem do `sendto` (canal fechado nunca aborta o frame) + watchdog do relay mudo (deploy)
+
+### sendto sem exceção
+
+O engine chama `Net.sendto()` **dentro do frame WASM** (via `invoke_vd`). Quando
+o canal `read` está fechado/mid-teardown (o proxy derruba os canais quando o
+upstream morre), `RTCDataChannel.send()` lança `InvalidStateError: readyState is
+not 'open'` — a exceção propaga pelo WASM e o Emscripten **aborta o frame**:
+congelamento permanente, sem reload, mesmo com o stream retomando (observado em
+produção: relay mudo por ~85s, stream voltou, página continuou congelada).
+
+- `client/src/webrtc.ts` `sendto()`: guard `!this.channel ||
+  this.channel.readyState !== 'open'` → descarta o pacote em silêncio;
+  `try/catch` em volta do `send` (cobre também `QuotaExceededError` — buffer
+  SCTP cheio); `this.channel = undefined` nos handlers `onclose`/`onerror` do
+  canal `read`. O glue de rede nunca lança para o engine.
+
+### Watchdog do relay mudo (scripts/watch-mudo.sh, repo principal)
+
+Recuperação via **kick RCON** do HLTV no servidor de jogo — `docker restart
+cs16-watch-hltv` foi **comprovadamente ineficaz**: o relay reiniciou, reconectou
+no servidor (jogo via `status` mostrou novo userid HLTV) e continuou mudo; o
+kick força um handshake netchan novo e o stream voltou em ~20s.
+
+- Detecção: o proxy loga `HLTV upstream stalled: no UDP data, tearing down
+  bridge` quando derruba a bridge por idle (25s sem dados, com browser
+  conectado). O watchdog (cron a cada minuto) age se esse evento ocorreu nos
+  últimos 90s **e** não há `recving` recente (30s) — se o stream voltou sozinho,
+  não age. Keepalives de 48 bytes não disparam o teardown (resetam o timer) e
+  correspondem a stream saudável em jogo quieto.
+- Ação: `servers.sh rcon main "kick ZueiraHLTV"`; se o RCON não acusar o kick,
+  escala para `docker restart cs16-watch-hltv`. Cooldown de 5min entre ações e
+  aviso no log após 3 episódios seguidos (sugerindo reiniciar o servidor de
+  jogo, o destravamento definitivo).
+
 ## Configuração de deploy
 
 A config de deployment (hltv.cfg, start-hltv.sh) vive em `config/watch/` no
