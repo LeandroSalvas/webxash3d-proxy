@@ -200,9 +200,11 @@ async function main() {
     });
 }
 
-// If the tab comes back after being hidden long enough for the engine's netchan
-// to time out (cl_timeout), rejoin over the still-alive WebRTC channel instead of
-// reloading the page (avoids re-downloading valve.zip).
+// The net.incoming backlog (maxPackets 8192, ~5.7min at 24fps) keeps the delta
+// chain intact for hides below that: on refocus the engine drains it in order and
+// fast-forwards to live instead of freezing. For hides long enough that the
+// buffer could overflow (or cl_timeout), rejoin over the still-alive WebRTC
+// channel instead of reloading the page (avoids re-downloading valve.zip).
 let hiddenSince = 0
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
@@ -210,7 +212,7 @@ document.addEventListener('visibilitychange', () => {
         return
     }
     const hiddenFor = Date.now() - hiddenSince
-    if (started && x && hiddenFor > 15000) {
+    if (started && x && hiddenFor > 60000) {
         try {
             x.Cmd_ExecuteString('disconnect')
         } catch {}

@@ -21,7 +21,12 @@ export class Xash3DWebRTC extends Xash3D {
 
     constructor(opts: Xash3DWebRTCOptions) {
         super(opts);
-        this.net = new Net(this)
+        // Large packet backlog so the engine never drops packets while the tab
+        // is hidden (rAF throttled ~1fps). Dropping the oldest packets breaks the
+        // HLTV delta chain and permanently freezes the renderer ("delta frame is
+        // too old" -> validsequence=0). 8192 packets ~= 5.7min at 24fps; the
+        // reconnect threshold in main.ts (60s) sits well below that.
+        this.net = new Net(this, { maxPackets: 8192 })
         this.proxyHost = opts.proxyHost
         this.proxyPort = opts.proxyPort
         this.proxyIp = this.parseIp(opts.proxyHost)
