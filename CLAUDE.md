@@ -28,11 +28,19 @@ O fork adiciona (detalhes em `PATCHES.md`):
 4. Configuração por ambiente: `PACKAGE_ZIP`, `UDP_PORT_RANGE` (faixa de portas
    ICE), `CONSOLE_COMMANDS`, nome do espectador.
 5. Build multi-stage (Node/Vite + Rust) no `Dockerfile`.
-6. Robustez do cliente: aba oculta não congela (shim rAF + `maxPackets: 8192`),
-   loading por estágios PT-BR, erros visíveis, sem `getUserMedia`.
+6. Robustez do cliente: aba oculta não congela (shim rAF + backlog grande do
+   `net.incoming`), loading por estágios PT-BR, erros visíveis, microfone
+   desabilitado (stub de `getUserMedia` no `index.html` — o glue do engine
+   pedia a permissão no boot).
 7. **Auto-recuperação**: watchdog de stall no cliente (rejoin + reload
    silencioso), teardown de idle na bridge, reconexão em close/error do canal.
 8. Causa raiz conhecida: HLTV relay pode ficar "mudo" (veja PATCHES.md §8).
+9. **Overflow do buffer → rejoin proativo**: o relay produz mais rápido que o
+   engine consome (1 pacote/frame via `recvfrom`), o `RollingBuffer` (16384)
+   enchia em ~3-7 min e o descarte do pacote mais antigo quebrava a cadeia
+   delta do HLTV (congelamento permanente, watchdog quieto). O watchdog de
+   backlog faz `rejoin()` a 80% do buffer e `rejoin()` limpa o buffer
+   (`netClear()`) para não envenenar a nova sessão (veja PATCHES.md §9).
 
 ## Deploy real (csserver_wstats)
 
@@ -157,8 +165,11 @@ webxash3d-proxy/
 - `Xash3DWebRTC` class extends `Xash3D` from xash3d-fwgs
 - WebSocket to `/websocket` for signaling
 - `write` channel: receives server packets, `lastPacketAt = Date.now()`, enqueues to `net.incoming`
-- `net.incoming` com `maxPackets: 8192` (~5,7 min a 24fps) — evita quebrar a
-  cadeia delta do HLTV com a aba oculta
+- `net.incoming` com `maxPackets: 16384` (~11 min a 24fps) — evita quebrar a
+  cadeia delta do HLTV com a aba oculta; `overflowDrops` + log `[net] buffer
+  cheio…` para diagnosticar descartes (veja PATCHES.md §9)
+- Helpers do watchdog de backlog: `netBacklog()`, `netCapacity()`, `netClear()`
+  (flush do buffer no `rejoin()`)
 - `read` channel: sendto() sends packets to server (virtual address 127.0.0.1:8080)
 - `onclose`/`onerror` do canal `write` e estado `failed` da peer → `scheduleReconnect()`
   (reconnect com backoff exponencial 1s→30s)

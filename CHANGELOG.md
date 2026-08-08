@@ -4,6 +4,10 @@
 
 Base: upstream `9cb046f` (1.0.0). Alterações em `PATCHES.md`.
 
+## 1.3.0 (2026-08-08)
+
+* fix: proactive rejoin on net.incoming overflow — active-tab freeze ([075ba61](https://github.com/LeandroSalvas/webxash3d-proxy/commit/075ba61)) — o relay produz mais rápido que o engine consome (1 pacote/frame via `recvfrom`); o `RollingBuffer` enchia em ~3-7 min e o descarte do pacote mais antigo quebrava a cadeia delta do HLTV (congelamento permanente com a aba ativa, watchdog de stall quieto pois pacotes continuavam chegando). Watchdog de backlog (`rejoin()` a 80% do buffer), `rejoin()` limpa o backlog da sessão anterior (`netClear()`), `maxPackets` 8192 → 16384, contadores `overflowDrops`/`backlogRejoins` + logs `[net]`/`[backlog]`, e stub de `getUserMedia` no `index.html` (o glue do engine pedia a permissão de microfone no boot)
+
 ## 1.2.0 (2026-08-07)
 
 * feat: self-healing spectator with silent reload and upstream watchdog ([763895d](https://github.com/LeandroSalvas/webxash3d-proxy/commit/763895d)) — watchdog de stall no cliente (`STALL_MS=15000` → rejoin → reload silencioso após 6 tentativas, guarda `sessionStorage`), teardown de idle na bridge (`IDLE_TIMEOUT=25s`, armado em `saw_packet || browser_started`), reconexão em close/error do canal, `beforeunload` removido

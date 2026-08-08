@@ -57,18 +57,19 @@ selecionando uma curva suportada, aplicado via `[patch.crates-io]` no
   requestAnimationFrame, cancelAnimationFrame }` em `main.ts`. Com a aba oculta,
   o loop vira `setTimeout` (~1fps), então o netchan do cliente não estoura o
   `cl_timeout` e a sessão com o relay HLTV sobrevive ao voltar.
-- **Backlog do net.incoming elevado**: `maxPackets: 8192` (~5,7 min a 24fps).
-  O padrão (128 pacotes, ~5,3s) descartava os pacotes mais antigos quando a aba
-  ficava oculta, quebrava a cadeia delta do HLTV ("delta frame is too old" →
-  `cl.validsequence=0`) e congelava o renderer permanentemente. Com o backlog
-  maior, escondidas curtas drenam os pacotes em ordem (fast-forward até o
-  ao-vivo) em vez de congelar.
+- **Backlog do net.incoming elevado**: `maxPackets: 8192` (~5,7 min a 24fps;
+  hoje 16384, ver §9). O padrão (128 pacotes, ~5,3s) descartava os pacotes mais
+  antigos quando a aba ficava oculta, quebrava a cadeia delta do HLTV ("delta
+  frame is too old" → `cl.validsequence=0`) e congelava o renderer
+  permanentemente. Com o backlog maior, escondidas curtas drenam os pacotes em
+  ordem (fast-forward até o ao-vivo) em vez de congelar.
 - **Auto-reconexão em `visibilitychange`**: se a aba voltou após >60s oculta,
   `disconnect` + `connect` pelo canal WebRTC ainda vivo (sem recarregar o
   `valve.zip`).
-- **Microfone removido**: `getUserMedia` não é mais chamado (espectador não
-  fala). Isso desbloqueia o iOS Safari/iframe, onde a permissão sem gesto do
-  usuário travava o `connect()` e impedia o `x.main()`.
+- **Microfone não é solicitado pelo código do cliente**: o `client/src` nunca
+  chama `getUserMedia` (espectador não fala). Ainda assim o glue do engine
+  (captura SDL2/AL de voice) disparava o prompt no boot — resolvido com o stub
+  de rejeição do §10.
 - **Tela de loading com estágios**: rótulos PT-BR ("Baixando arquivos…",
   "Descompactando…", "Conectando…"), barra customizada (track+fill) com % real
   e animação indeterminada no boot do engine. Substitui a barra nativa de 8px.
@@ -117,6 +118,48 @@ mas o destravamento definitivo é reiniciar o servidor de jogo (o HLTV reconecta
 sozinho em ~20s). Mitigação operacional sugerida (follow-up): alerta
 Grafana/Prometheus se o write-channel ficar 0 por N minutos, ou auto-restart do
 `watch-hltv`.
+
+## 9. Overflow do buffer → rejoin proativo (congelamento com a aba ativa)
+
+O backlog do §6 protegia apenas a aba oculta. Com a aba **ativa**, o relay
+produz mais rápido do que o engine consome — o `recvfrom` do `net.js` puxa
+**1 pacote por frame** (~24-60/s) enquanto o relay HLTV broadcasta na própria
+taxa de ticks. O `RollingBuffer` enche em alguns minutos (3-7 no deploy real) e
+o `push()` (rb.js) descarta o pacote **mais antigo**, quebrando a cadeia delta
+do HLTV de novo ("delta frame is too old" → `cl.validsequence=0`): o renderer
+congela **permanentemente** e o watchdog de stall **não** age, porque os
+pacotes continuam chegando (`lastPacketAt` segue atualizando). Sintomas: freeze
+determinístico com a janela ativa, sem reload automático, áudio para e input
+não destrava.
+
+- `client/src/webrtc.ts`: `maxPackets` elevado a **16384** (mais folga);
+  `overflowDrops` conta descartes reais e loga `[net] buffer cheio…`; helpers
+  `netBacklog()`/`netCapacity()`/`netClear()` expostos ao watchdog.
+- `client/src/main.ts`: watchdog de backlog no mesmo `setInterval` de 2s — se
+  `netBacklog() ≥ 80%` da capacidade, `rejoin()` **proativo** (conta
+  `backlogRejoins`, log `[backlog]`) para resetar a cadeia delta ANTES de
+  qualquer descarte. O rejoin é uma reconexão pelo canal WebRTC ainda vivo (o
+  relay manda base nova de deltas), não um reload.
+- `rejoin()` agora chama `netClear()` no início **e** imediatamente antes do
+  `connect`, para pacotes velhos da sessão anterior (ainda drenando do relay)
+  não envenenarem a cadeia da nova sessão.
+- **Relay (deploy)**: `sys_ticrate 30` no `config/watch/hltv.cfg` limita a
+  produção a ~30 ticks/s (mesmo teto do `sv_maxupdaterate` do servidor de
+  jogo), tornando o overflow improvável; o rejoin proativo cobre picos/bursts.
+
+## 10. Microfone (getUserMedia) — stub de rejeição
+
+O prompt de permissão de microfone não vinha do código do cliente: o glue do
+engine `xash3d-fwgs` (`dist/generated/xash.js`, ~linha 5653-5654) chama
+`navigator.mediaDevices.getUserMedia({ audio: true })` no init da captura
+SDL2/AL (voice), que dispara o prompt no boot do espectador (e no iOS
+Safari/iframe um `getUserMedia` sem gesto do usuário pendura o `connect()`).
+
+Correção: stub inline no `<head>` do `index.html` (antes do módulo) que
+sobrescreve `navigator.mediaDevices.getUserMedia` para rejeitar
+(`Promise.reject`) quando `constraints` pedir `audio`/`video`. O `onError` do
+glue (que apenas registra `mediaStreamError`) lida com a rejeição e o voice cai
+em silêncio — sem prompt e sem afetar o áudio de saída.
 
 ## Configuração de deploy
 

@@ -12,7 +12,8 @@ browser assiste a partida ao vivo.
 
 - **Patches do fork**: veja `PATCHES.md` (ack do HLTV, DTLS vendored para o
   Chrome, auto-recuperação com watchdog/reload silencioso/teardown de idle,
-  robustez de aba oculta, etc.).
+  robustez de aba oculta, rejoin proativo em overflow do buffer, microfone
+  desabilitado, etc.).
 - **Deploy**: o stack opt-in `watch-main` + `watch-hltv` é gerenciado pelo
   `./scripts/watch.sh` no repo principal (compose em `docker-compose.watch.yml`,
   config do relay em `config/watch/`). Portas: `27018` (página + signaling),
@@ -22,6 +23,14 @@ browser assiste a partida ao vivo.
   rejoin → reload silencioso após 6 tentativas), teardown de idle na bridge
   (`IDLE_TIMEOUT=25s`), reconexão em close/error do canal; a sessão sobrevive a
   reinícios do servidor de jogo.
+- **Overflow do buffer → rejoin proativo**: o relay produz mais rápido que o
+  engine consome (1 pacote/frame), o `RollingBuffer` enchia e o descarte do
+  pacote mais antigo quebrava a cadeia delta do HLTV (congelamento permanente
+  com a aba ativa, watchdog quieto). O watchdog de backlog faz `rejoin()` a 80%
+  do buffer e `rejoin()` limpa o backlog da sessão anterior. No deploy, o relay
+  roda com `sys_ticrate 30` para a produção acompanhar o consumo.
+- **Microfone desabilitado**: stub de `getUserMedia` no `index.html` (o glue do
+  engine pedia a permissão no boot); sem prompt para o espectador.
 - A porta default do proxy continua `27016`; o deploy a sobrescreve via
   `LISTEN_PORT`/`WATCH_LISTEN_PORT=27018`.
 
