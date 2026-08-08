@@ -373,6 +373,16 @@ async fn handle_ws_messages(
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
+                // Client keepalive: handle before the strict SignalMessage parse,
+                // which requires a `data` field the ping message doesn't carry
+                // (otherwise every 60s ping logged a spurious "Invalid signal
+                // message" WARN and the silent PING arm below never ran).
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if value.get("event").and_then(|e| e.as_str()) == Some(events::PING) {
+                        continue;
+                    }
+                }
+
                 let signal: SignalMessage = match serde_json::from_str(&text) {
                     Ok(s) => s,
                     Err(e) => {
