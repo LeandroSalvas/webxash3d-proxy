@@ -137,6 +137,12 @@ async function main() {
     configHost = config.proxy_host
     configPort = config.proxy_port
 
+    // Transport rebuilds (WS/peer reset) deixam o engine com a baseline netchan
+    // velha: os pacotes voltam a fluir (o watchdog de stall dorme) mas a cadeia
+    // delta quebrou. Rejoin re-sincroniza a baseline — sem isso um reset de
+    // transporte congela a tela para sempre mesmo com stream saudável.
+    x.onReconnected = () => { if (started) rejoin() }
+
     let bootDone = false
     const [zip, extras] = await Promise.all([
         (async () => {
@@ -281,11 +287,22 @@ setInterval(() => {
     }
     stallCount += 1
     console.warn(`[watchdog] stream sem dados há ${Math.round(idleMs / 1000)}s (tentativa ${stallCount})`)
-    if (stallCount >= REJOIN_ATTEMPTS_BEFORE_RELOAD && !sessionStorage.getItem('watchStallReloaded')) {
-        sessionStorage.setItem('watchStallReloaded', '1')
-        console.error('[watchdog] rejoin falhou, recarregando a página')
-        location.reload()
-        return
+    if (stallCount >= REJOIN_ATTEMPTS_BEFORE_RELOAD) {
+        if (!sessionStorage.getItem('watchStallReloaded')) {
+            sessionStorage.setItem('watchStallReloaded', '1')
+            console.error('[watchdog] rejoin falhou, recarregando a página')
+            location.reload()
+            return
+        }
+        // Guard já consumido (a página já recarregou): em vez de rejoin infinito
+        // sobre um canal possivelmente morto, reconstrói o transporte WebRTC —
+        // o onReconnected re-sincroniza a baseline via rejoin. Só a cada 12
+        // stalls (~24s) para não virar churn.
+        if (stallCount % 12 === 0) {
+            console.error('[watchdog] canal morto após reload — forçando reconnect WebRTC')
+            x.forceReconnect()
+            return
+        }
     }
     rejoin()
 }, 2000)

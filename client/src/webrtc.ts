@@ -15,6 +15,7 @@ export class Xash3DWebRTC extends Xash3D {
     private wasRemote = false
     private reconnectTimer?: ReturnType<typeof setTimeout>
     private reconnectDelay = 1000
+    private keepaliveTimer?: ReturnType<typeof setInterval>
     private proxyHost: string
     private proxyPort: number
     private proxyIp: [number, number, number, number]
@@ -23,6 +24,13 @@ export class Xash3DWebRTC extends Xash3D {
     /** How many packets the RollingBuffer dropped because it overflowed (diagnostics). */
     overflowDrops = 0
     private maxPackets = 16384
+    /** True once the initial WebSocket/peer pair has fully opened its channels;
+     *  a later channelsCount===2 means a transport rebuild, not the first connect. */
+    private wasConnected = false
+    /** Called when a rebuilt WebSocket/peer pair opens its channels. The engine's
+     *  netchan baseline is stale after a transport reset even though packets flow
+     *  again, so main.ts rejoins to re-sync the HLTV delta chain. */
+    onReconnected?: () => void
 
     constructor(opts: Xash3DWebRTCOptions) {
         super(opts);
@@ -167,7 +175,13 @@ export class Xash3DWebRTC extends Xash3D {
                     this.channel = e.channel
                 }
                 if (channelsCount === 2) {
-                    if (this.resolve) {
+                    if (this.wasConnected) {
+                        // Transport rebuilt after a reset: the engine's delta
+                        // chain is stale even if packets flow again, so signal
+                        // main.ts to rejoin instead of freezing on a bad baseline.
+                        this.onReconnected?.()
+                    } else if (this.resolve) {
+                        this.wasConnected = true
                         const r = this.resolve
                         this.resolve = undefined
                         r()
@@ -222,11 +236,24 @@ export class Xash3DWebRTC extends Xash3D {
         }, delay)
     }
 
+    /** Immediately rebuild the WebSocket + WebRTC peer (watchdog escalation for
+     *  when scheduleReconnect isn't firing and a page reload is guard-blocked).
+     *  The rebuilt pair triggers onReconnected, which rejoins the game. */
+    forceReconnect(): void {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer)
+            this.reconnectTimer = undefined
+        }
+        this.reconnectDelay = 1000
+        this.connectWs()
+    }
+
     private connectWs() {
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer)
             this.reconnectTimer = undefined
         }
+        this.stopKeepalive()
         if (this.ws) {
             const old = this.ws
             old.onopen = null
@@ -253,12 +280,37 @@ export class Xash3DWebRTC extends Xash3D {
         }
         this.ws = new WebSocket(`${protocol}://${host}/websocket`);
         this.ws.onerror = () => {
+            this.stopKeepalive()
             this.scheduleReconnect()
+        }
+        this.ws.onclose = () => {
+            this.stopKeepalive()
         }
         this.ws.addEventListener('message', handler)
         this.ws.onopen = () => {
             this.reconnectDelay = 1000
+            this.startKeepalive()
             this.startConnection()
+        }
+    }
+
+    /** Keep the signaling WebSocket busy so intermediate proxies/NAT (swag,
+     *  router) don't idle-timeout it. The game data flows over WebRTC/UDP, so
+     *  the WS goes quiet after the handshake; a 240s idle reset used to force a
+     *  full WebRTC rebuild (~2-3s stream gap) every 4 minutes. */
+    private startKeepalive() {
+        this.stopKeepalive()
+        this.keepaliveTimer = setInterval(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({ event: 'ping' }))
+            }
+        }, 60000)
+    }
+
+    private stopKeepalive() {
+        if (this.keepaliveTimer) {
+            clearInterval(this.keepaliveTimer)
+            this.keepaliveTimer = undefined
         }
     }
 

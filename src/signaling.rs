@@ -31,6 +31,9 @@ mod events {
     pub const OFFER: &str = "offer";
     pub const ANSWER: &str = "answer";
     pub const CANDIDATE: &str = "candidate";
+    /// Client keepalive so the signaling WebSocket never hits an idle timeout
+    /// (intermediate proxies/NAT reset it after ~240s, forcing a WebRTC rebuild).
+    pub const PING: &str = "ping";
 }
 
 /// WebSocket signaling message
@@ -384,6 +387,9 @@ async fn handle_ws_messages(
                     }
                     events::CANDIDATE => {
                         handle_candidate(peer, signal.data, &client_id).await;
+                    }
+                    events::PING => {
+                        // Keepalive: nothing to do, just keep the WS alive.
                     }
                     _ => {
                         warn!(client_id = %client_id, event = %signal.event, "Unknown signal event");
