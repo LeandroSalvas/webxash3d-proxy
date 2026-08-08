@@ -185,16 +185,66 @@ cs16-watch-hltv` foi **comprovadamente ineficaz**: o relay reiniciou, reconectou
 no servidor (jogo via `status` mostrou novo userid HLTV) e continuou mudo; o
 kick força um handshake netchan novo e o stream voltou em ~20s.
 
-- Detecção: o proxy loga `HLTV upstream stalled: no UDP data, tearing down
-  bridge` quando derruba a bridge por idle (25s sem dados, com browser
-  conectado). O watchdog (cron a cada minuto) age se esse evento ocorreu nos
-  últimos 90s **e** não há `recving` recente (30s) — se o stream voltou sozinho,
-  não age. Keepalives de 48 bytes não disparam o teardown (resetam o timer) e
-  correspondem a stream saudável em jogo quieto.
+- Detecção por **taxa de pacotes de jogo**: o proxy loga `recving N bytes` por
+  pacote UDP repassado ao espectador; o keepalive do HLTV tem exatamente **48
+  bytes** e é enviado a cada ~2s. Stream saudável é ~99% pacotes de jogo (≠48B)
+  a ~10-20/s; mudo = só keepalives de 48B (ou silêncio total, ou um gotejar de
+  ~0.3-0.5/s). O keepalive de 48B reseta o teardown de idle do proxy, então nem
+  `HLTV upstream stalled` nem a taxa total separam mudo de saudável — a contagem
+  de pacotes ≠48B separa (margem enorme: 15/s vs 0.5/s). O watchdog (cron a cada
+  minuto) age se houver **menos de 45 pacotes ≠48B em 90s** **e** alguém esteve
+  assistindo (bridge WebRTC aberta nos últimos 10 min). A detecção antiga
+  (evento `HLTV upstream stalled` + sem `recving` recente) não pegava o mudo em
+  forma de trickle/keepalive-only — corrigida nesta revisão.
 - Ação: `servers.sh rcon main "kick ZueiraHLTV"`; se o RCON não acusar o kick,
   escala para `docker restart cs16-watch-hltv`. Cooldown de 5min entre ações e
   aviso no log após 3 episódios seguidos (sugerindo reiniciar o servidor de
   jogo, o destravamento definitivo).
+
+## 12. Rejoin após reconstrução de transporte (tela congelada com stream saudável)
+
+Um reset de transporte (WS/peer WebRTC) deixa o engine com a baseline netchan
+**velha**: o proxy reabre a bridge e os pacotes voltam a fluir normalmente, mas
+a cadeia delta do HLTV quebrou ("delta frame is too old" → `cl.validsequence=0`)
+e o renderer congela **para sempre** — o watchdog de stall **não** age porque
+`lastPacketAt` segue atualizando com a nova stream (observado em produção: relay
+saudável a ~17 pkt/s, cliente conectado, tela congelada após um reset de WS).
+
+- `client/src/webrtc.ts`: flag `wasConnected` (setada quando o par WS/peer
+  inicial abre os canais). No `ondatachannel`, `channelsCount === 2` depois do
+  primeiro connect significa **rebuild de transporte** → dispara o callback
+  público `onReconnected` (em vez de re-resolver o promise do `connect()`).
+- `client/src/main.ts`: `x.onReconnected = () => { if (started) rejoin() }` — o
+  `rejoin()` (disconnect + connect pelo canal vivo) re-sincroniza a baseline em
+  ~2s, destravando a tela sem reload e sem re-baixar `valve.zip`.
+- `client/src/webrtc.ts` `forceReconnect()`: reconstrói WS+peer imediatamente
+  (reset de `reconnectDelay`, `connectWs()` direto). Usado pelo watchdog quando
+  o canal está morto e o reload já é guard-bloqueado.
+- `client/src/main.ts` watchdog: quando `stallCount >=
+  REJOIN_ATTEMPTS_BEFORE_RELOAD` **e** a guarda `sessionStorage.watchStallReloaded`
+  já foi consumida (a página já recarregou), em vez de `rejoin()` infinito sobre
+  um canal possivelmente morto, chama `forceReconnect()` a cada 12 stalls (~24s)
+  — o rebuild dispara `onReconnected` → rejoin, completando o ciclo de
+  auto-recuperação.
+
+## 13. Keepalive do WS de sinalização (timeout de ociosidade de 240s)
+
+Causa raiz dos resets periódicos de transporte: os dados do jogo trafegam por
+WebRTC/UDP (`write`/`read` channels), então o WebSocket de sinalização fica
+**ocioso** após o handshake. Um timeout de ociosidade de ~240s em um proxy/NAT
+intermediário (deploy: swag → roteador/hairpin) resetava o WS com RST
+("Connection reset without closing handshake") — o cliente reagia com
+`scheduleReconnect()` → novo peer WebRTC → gap de ~2-3s no stream, e sem o §12
+congelava a tela. Determinístico: resets a cada 242-243s, toda sessão.
+
+- `client/src/webrtc.ts`: `startKeepalive()` envia `{"event":"ping"}` pelo WS a
+  cada 60s (iniciado no `onopen`, limpo em `onerror`/`onclose` e no `connectWs`)
+  — a mensagem percorre todo o caminho e reseta o timer de ociosidade de cada
+  hop, o WS nunca fica ocioso e o timeout de 240s não dispara mais.
+- `src/signaling.rs`: constante `events::PING` + handler **silencioso** (sem
+  `warn "Unknown signal event"` a cada minuto).
+- Resultado em produção: sessão contínua por 10+ minutos sem nenhum reset
+  (antes: reset a cada 4 min).
 
 ## Configuração de deploy
 

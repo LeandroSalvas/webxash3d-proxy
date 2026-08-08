@@ -4,6 +4,10 @@
 
 Base: upstream `9cb046f` (1.0.0). Alterações em `PATCHES.md`.
 
+## 1.4.0 (2026-08-08)
+
+* fix: rejoin after transport rebuild, force-reconnect escalation and WS keepalive — reset de transporte (WS/peer WebRTC) deixava o engine com a baseline netchan velha: os pacotes voltavam a fluir (watchdog de stall quieto, pois `lastPacketAt` seguia atualizando) mas a cadeia delta do HLTV quebrada congelava a tela **para sempre** mesmo com o stream saudável. `wasConnected`/`onReconnected` em `webrtc.ts` (rebuild de transporte → rejoin para re-sincronizar a baseline em ~2s), `forceReconnect()` no watchdog quando a guarda de reload já foi consumida (a cada 12 stalls, em vez de `rejoin()` infinito). Causa raiz dos resets periódicos: timeout de ociosidade de ~240s no WS de sinalização (dados vão por WebRTC/UDP) — keepalive `{"event":"ping"}` a cada 60s no cliente + handler silencioso no `signaling.rs` (veja `PATCHES.md` §12/§13)
+
 ## 1.3.0 (2026-08-08)
 
 * fix: proactive rejoin on net.incoming overflow — active-tab freeze ([075ba61](https://github.com/LeandroSalvas/webxash3d-proxy/commit/075ba61)) — o relay produz mais rápido que o engine consome (1 pacote/frame via `recvfrom`); o `RollingBuffer` enchia em ~3-7 min e o descarte do pacote mais antigo quebrava a cadeia delta do HLTV (congelamento permanente com a aba ativa, watchdog de stall quieto pois pacotes continuavam chegando). Watchdog de backlog (`rejoin()` a 80% do buffer), `rejoin()` limpa o backlog da sessão anterior (`netClear()`), `maxPackets` 8192 → 16384, contadores `overflowDrops`/`backlogRejoins` + logs `[net]`/`[backlog]`, e stub de `getUserMedia` no `index.html` (o glue do engine pedia a permissão de microfone no boot)
