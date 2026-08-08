@@ -192,12 +192,24 @@ async function main() {
     }
 
     x.Cmd_ExecuteString(`connect ${configHost}:${configPort}`)
+}
 
-    window.addEventListener('beforeunload', (event) => {
-        event.preventDefault();
-        event.returnValue = '';
-        return '';
-    });
+// Game-level rejoin: drop the HLTV spectator session and reconnect over the
+// (still-alive) WebRTC channel. Used for long hidden tabs and for stream stalls,
+// avoiding a full reload (which would re-download valve.zip).
+let rejoinInFlight = false
+function rejoin() {
+    if (rejoinInFlight || !x || !started) return
+    rejoinInFlight = true
+    try {
+        x.Cmd_ExecuteString('disconnect')
+    } catch {}
+    setTimeout(() => {
+        try {
+            x!.Cmd_ExecuteString(`connect ${configHost}:${configPort}`)
+        } catch {}
+        rejoinInFlight = false
+    }, 300)
 }
 
 // The net.incoming backlog (maxPackets 8192, ~5.7min at 24fps) keeps the delta
@@ -213,16 +225,38 @@ document.addEventListener('visibilitychange', () => {
     }
     const hiddenFor = Date.now() - hiddenSince
     if (started && x && hiddenFor > 60000) {
-        try {
-            x.Cmd_ExecuteString('disconnect')
-        } catch {}
-        setTimeout(() => {
-            try {
-                x!.Cmd_ExecuteString(`connect ${configHost}:${configPort}`)
-            } catch {}
-        }, 300)
+        rejoin()
     }
 })
+
+// Stream stall watchdog (active tab): the game/HLTV upstream can die without
+// the WebRTC connection noticing (SCTP keepalives keep the peer "connected"
+// while packets just stop arriving). If no game packet arrives for STALL_MS,
+// force a rejoin; escalate to a single full reload so a wedged bridge/peer
+// never leaves a frozen screen. The reload guard (sessionStorage) prevents a
+// reload loop while the game server is genuinely down.
+const STALL_MS = 15000
+const REJOIN_ATTEMPTS_BEFORE_RELOAD = 6
+let stallCount = 0
+setInterval(() => {
+    if (!started || !x || document.hidden) return
+    const lastPacketAt = x.lastPacketAt
+    if (!lastPacketAt) return
+    const idleMs = Date.now() - lastPacketAt
+    if (idleMs <= STALL_MS) {
+        stallCount = 0
+        return
+    }
+    stallCount += 1
+    console.warn(`[watchdog] stream sem dados há ${Math.round(idleMs / 1000)}s (tentativa ${stallCount})`)
+    if (stallCount >= REJOIN_ATTEMPTS_BEFORE_RELOAD && !sessionStorage.getItem('watchStallReloaded')) {
+        sessionStorage.setItem('watchStallReloaded', '1')
+        console.error('[watchdog] rejoin falhou, recarregando a página')
+        location.reload()
+        return
+    }
+    rejoin()
+}, 2000)
 
 const enableTouch = localStorage.getItem('touchControls')
 if (enableTouch === null) {

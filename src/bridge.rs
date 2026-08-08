@@ -1,7 +1,9 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 
@@ -59,16 +61,22 @@ impl Bridge {
 
     /// Start bidirectional forwarding
     pub async fn start(self: Arc<Self>) {
+        // Set once the browser sends its first packet (past valve.zip download,
+        // its connect handshake has started). Shared by the two forwarders so
+        // the upstream idle timeout also fires for a bridge that never hears back.
+        let browser_started = Arc::new(AtomicBool::new(false));
+
         // Spawn UDP → WebRTC forwarder (server responses to browser via write channel)
         let udp_to_webrtc = tokio::spawn({
             let bridge = self.clone();
+            let browser_started = browser_started.clone();
             async move {
-                bridge.forward_udp_to_webrtc().await;
+                bridge.forward_udp_to_webrtc(browser_started).await;
             }
         });
 
         // Setup WebRTC → UDP forwarder (browser commands to server via read channel)
-        self.setup_webrtc_to_udp();
+        self.setup_webrtc_to_udp(browser_started);
 
         // Wait for shutdown signal
         self.shutdown.notified().await;
@@ -79,14 +87,23 @@ impl Bridge {
     }
 
     /// Forward packets from UDP (game server) to WebRTC write channel (browser)
-    async fn forward_udp_to_webrtc(&self) {
+    async fn forward_udp_to_webrtc(&self, browser_started: Arc<AtomicBool>) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
+
+        // The HLTV streams continuously once the spectator is connected, so a
+        // long silence means the upstream (HLTV / game server) is dead. The
+        // timeout arms once the upstream answers (saw_packet) OR the browser
+        // starts its connect handshake (browser_started) — no timeout while
+        // the browser is still downloading valve.zip and has sent nothing.
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(25);
+        let mut saw_packet = false;
 
         loop {
             tokio::select! {
                 result = self.udp_socket.recv(&mut buf) => {
                     match result {
                         Ok(n) if n > 0 => {
+                            saw_packet = true;
                             let mut data = bytes::Bytes::copy_from_slice(&buf[..n]);
 
                             // The HLTV appends a 16-zero cookie to the GoldSrc
@@ -127,11 +144,22 @@ impl Bridge {
                             error!(
                                 client_id = %self.client_id,
                                 error = %e,
-                                "UDP recv error"
+                                "UDP recv error, tearing down bridge (upstream lost)"
                             );
+                            self.teardown().await;
                             break;
                         }
                     }
+                }
+                _ = tokio::time::sleep(IDLE_TIMEOUT), if saw_packet
+                    || browser_started.load(Ordering::Relaxed) => {
+                    warn!(
+                        client_id = %self.client_id,
+                        idle_seconds = IDLE_TIMEOUT.as_secs(),
+                        "HLTV upstream stalled: no UDP data, tearing down bridge"
+                    );
+                    self.teardown().await;
+                    break;
                 }
                 () = self.shutdown.notified() => {
                     break;
@@ -140,20 +168,37 @@ impl Bridge {
         }
     }
 
+    /// Close the data channels and signal shutdown so the browser notices the
+    /// connection is dead. SCTP keepalives keep the WebRTC connection "alive"
+    /// (and the peer state Connected) even when the upstream is gone, so the
+    /// client would otherwise freeze forever without any signal.
+    async fn teardown(&self) {
+        if let Err(e) = self.write_channel.close().await {
+            error!(client_id = %self.client_id, error = %e, "Failed to close write channel");
+        }
+        if let Err(e) = self.read_channel.close().await {
+            error!(client_id = %self.client_id, error = %e, "Failed to close read channel");
+        }
+        self.shutdown.notify_one();
+    }
+
     /// Setup callback for WebRTC read channel → UDP forwarding (browser to game server)
-    fn setup_webrtc_to_udp(&self) {
+    fn setup_webrtc_to_udp(&self, browser_started: Arc<AtomicBool>) {
         let udp_socket = self.udp_socket.clone();
         let client_id = self.client_id.clone();
         let shutdown = self.shutdown.clone();
+        let browser_started = browser_started.clone();
 
         // Handle incoming messages on the read channel
         self.read_channel
             .on_message(Box::new(move |msg: DataChannelMessage| {
                 let udp_socket = udp_socket.clone();
                 let client_id = client_id.clone();
+                let browser_started = browser_started.clone();
 
                 Box::pin(async move {
                     let data = msg.data;
+                    browser_started.store(true, Ordering::Relaxed);
                     debug!(
                         client_id = %client_id,
                         bytes = data.len(),

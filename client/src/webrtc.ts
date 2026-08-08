@@ -18,6 +18,8 @@ export class Xash3DWebRTC extends Xash3D {
     private proxyHost: string
     private proxyPort: number
     private proxyIp: [number, number, number, number]
+    /** Timestamp of the last game packet received from the proxy (stall watchdog). */
+    lastPacketAt = 0
 
     constructor(opts: Xash3DWebRTCOptions) {
         super(opts);
@@ -96,6 +98,7 @@ export class Xash3DWebRTC extends Xash3D {
         this.peer.ondatachannel = (e) => {
             if (e.channel.label === 'write') {
                 e.channel.onmessage = (ee) => {
+                    this.lastPacketAt = Date.now()
                     const packet: Packet = {
                         ip: this.proxyIp,
                         port: this.proxyPort,
@@ -110,6 +113,15 @@ export class Xash3DWebRTC extends Xash3D {
                         (this.net as Net).incoming.enqueue(packet)
                     }
                 }
+            }
+            e.channel.onclose = () => {
+                // The proxy tears down the channels when the upstream (HLTV /
+                // game server) dies; the WebRTC peer otherwise stays "connected"
+                // via SCTP keepalives and the client would freeze forever.
+                this.scheduleReconnect()
+            }
+            e.channel.onerror = () => {
+                this.scheduleReconnect()
             }
             e.channel.onopen = () => {
                 channelsCount += 1

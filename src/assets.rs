@@ -25,10 +25,19 @@ pub fn serve_embedded(path: &str) -> Response<Body> {
         Some(content) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
 
+            // index.html must always revalidate: the hashed bundle it references
+            // is replaced on every client rebuild, so a stale cached HTML would
+            // 404 on the old hashed script and the client never boots.
+            let cache_control = if path == "index.html" {
+                "no-cache"
+            } else {
+                "public, max-age=3600"
+            };
+
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime.as_ref())
-                .header(header::CACHE_CONTROL, "public, max-age=3600")
+                .header(header::CACHE_CONTROL, cache_control)
                 .body(Body::from(content.data.into_owned()))
                 .unwrap_or_else(|_| internal_error())
         }
